@@ -504,48 +504,21 @@ final class GhosttySurfaceView: NSView, PaneRoleMutableSurface {
 
     // MARK: - Callback entry points
 
+    // already on the main actor (the callbacks hop via DispatchQueue.main.async); the session fields are
+    // observed, so the sidebar row and window title refresh live. `Session+PaneReports` owns the recording rules.
     func applyPwd(_ rawPwd: String) {
-        // already on the main actor (the callback hops via DispatchQueue.main.async); `currentCwd` is observed,
-        // so the sidebar row refreshes live. the OSC 7 value flows unquoted into a /bin/sh -c line via
-        // {AGT_SESSION_PWD} and into every cwd-inheriting spawn, so a newline (an sh -c separator) must never
-        // survive; a real path has none.
-        let pwd = TerminalText.sanitized(rawPwd)
-
-        // no save(): OSC 7 fires on every cd/prompt redraw and would thrash the disk. live cwd is persisted on
-        // quit and on structural mutations, so a crash loses only cwd changes since the last save. the
-        // equality guard matters likewise: an equal write still notifies observers and churns the reconcile.
         if let owner = scratchOwner {
-            owner.scratchCwd = pwd
+            owner.recordReportedCwd(rawPwd, pane: .scratch)
             return
         }
-        if isSplitPane {
-            if session?.splitCwd != pwd { session?.splitCwd = pwd }
-        } else {
-            if session?.currentCwd != pwd { session?.currentCwd = pwd }
-        }
+        session?.recordReportedCwd(rawPwd, pane: isSplitPane ? .right : .left)
     }
 
     func applyTitle(_ rawTitle: String) {
-        // already on the main actor; `oscTitle`/`splitTitle` are observed, so the sidebar row and window
-        // title refresh live. like applyPwd this does NOT save() — OSC set-title re-fires on every prompt
-        // redraw — and sanitizes: the title flows unquoted into a /bin/sh -c line via {AGT_SESSION_NAME}.
-        let title = TerminalText.sanitized(rawTitle)
-        // one value for the log and the drop below, so a trace can never name a cwd the check did not use.
-        let paneCwd = session.map { isSplitPane ? $0.cwd(for: .right) : $0.effectiveCwd }
-        logger.debug("terminal title pane=\(self.paneToken, privacy: .public) split=\(self.isSplitPane) cwd=\(paneCwd ?? "<none>", privacy: .public) title=\(rawTitle, privacy: .public)")
-
-        // libghostty answers OSC 7 with a synthetic title equal to the pwd, and its PWD action does not
-        // reliably reach `applyPwd` before that title, so no arming handshake catches it. A shell titles
-        // with a basename or an abbreviated path, never the bare absolute cwd. Compares the SANITIZED
-        // title, since `applyPwd` stores a sanitized cwd. Residual: between a cd and its OSC 7 the cwd
-        // here is still the old one, so a synthetic title for the NEW directory is accepted.
-        if title == paneCwd { return }
-
-        if isSplitPane {
-            if session?.splitTitle != title { session?.splitTitle = title }
-        } else {
-            if session?.oscTitle != title { session?.oscTitle = title }
-        }
+        let pane: CommandContext.Pane = isSplitPane ? .right : .left
+        let cwd = session?.cwd(for: pane) ?? "<none>"
+        logger.debug("terminal title pane=\(self.paneToken, privacy: .public) split=\(self.isSplitPane) cwd=\(cwd, privacy: .public) title=\(rawTitle, privacy: .public)")
+        session?.recordReportedTitle(rawTitle, pane: pane)
     }
 
     /// Marks this surface's exit as handled WITHOUT running `onExit`, so a queued callback for a process
